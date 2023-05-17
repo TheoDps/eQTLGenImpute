@@ -1,3 +1,6 @@
 tests
 *html
 bin/GenotypeHarmonizer-1.4.20*
+.nextflow*
+work/*
+singularity_img
