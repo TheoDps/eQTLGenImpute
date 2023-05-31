@@ -27,7 +27,7 @@ export NXF_HOME=../../nextflowcache
 nextflow_path=../../tools # folder where Nextflow executable is.
 reference_path=../hg38 # folder where you unpacked the reference files.
 
-cohort_name="GAIT2_RNAseq"
+cohort_name="GAIT2"
 qc_input_folder=../../1_DataQC/output/ # folder with QCd genotype and expression data, output of DataQC pipeline.
 output_path=../output/ # Output path.
 genome_build="GRCh37"
