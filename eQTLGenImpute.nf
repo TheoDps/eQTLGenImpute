@@ -19,7 +19,7 @@ def helpMessage() {
     -resume
 
     Mandatory arguments:
-      --qcdata                          Path to the folder with input unimputed plink files (have to be in hg19).
+      --qcdata                          Path to the folder with input unimputed plink files.
       --cohort_name                     Prefix for the output files.
 
       --outdir                          The output directory where the results will be saved.
@@ -30,14 +30,14 @@ def helpMessage() {
       --minimac_imputation_reference    Imputation reference panel for Minimac4 in M3VCF format (1000 Genomes 30x WGS high coverage).
 
     Optional arguments:
-      --chain_file                      Chain file to translate genomic coordinates from the source assembly to target assembly (e.g. hg19 --> hg38). hg19-->hg38 works by default.
-      --cohort_build                    The genome build to which the cohort is mapped (default is hg37, setting this to hg38 skips crossmapping)
+      --chain_file                      Chain file to translate genomic coordinates from the source assembly to target assembly (e.g. hg19 --> hg38). hg19-->hg38 & hg18-->hg38 works by default.
+      --cohort_build                    The genome build to which the cohort is mapped: hg18, GRCh36, hg19, GRCh37, hg38 or GRCh38 (default is hg37, setting this to hg38 skips crossmapping)
 
     """.stripIndent()
 }
 
 // Define set of accepted genome builds:
-def genome_builds_accepted = ['hg19', 'GRCh37', 'hg38', 'GRCh38']
+def genome_builds_accepted = ['hg18', 'GRCh36', 'hg19', 'GRCh37', 'hg38', 'GRCh38']
 
 // Define input channels
 Channel
@@ -54,7 +54,7 @@ Channel
 Channel
     .fromPath(params.ref_panel_hg38)
     .map { ref -> [file("${ref}.vcf.gz"), file("${ref}.vcf.gz.tbi")] }
-    .into { ref_panel_harmonise_genotypes_hg38; ref_panel_fixref_genotypes_hg38 }
+    .into { ref_panel_harmonise_genotypes_hg38; ref_panel_fixref_genotypes_hg38; ref_panel_maf }
 
 Channel
     .fromPath( "${params.eagle_phasing_reference}*" )
@@ -76,17 +76,22 @@ Channel
     .ifEmpty { exit 1, "Target reference genome file not found: ${params.target_ref}" }
     .into { target_ref_ch; target_ref_ch2 }
 
-params.chain_file="$baseDir/data/GRCh37_to_GRCh38.chain"
-
 if ((params.genome_build in genome_builds_accepted) == false) {
   exit 1, "[Pipeline error] Genome build $params.genome_build not in accepted genome builds: $genome_builds_accepted \n"
+}
+
+params.chain_file="$baseDir/data/GRCh37_to_GRCh38.chain"
+if (params.genome_build in ["hg18", "GRCh36"]) {
+    chain_file="$baseDir/data/hg18ToHg38.over.chain"
+} else {
+    chain_file=params.chain_file
 }
 
 skip_crossmap = params.genome_build in ["hg38", "GRCh38"]
 
 Channel
-    .fromPath(params.chain_file)
-    .ifEmpty { exit 1, "CrossMap.py chain file not found: ${params.chain_file}" }
+    .fromPath(chain_file)
+    .ifEmpty { exit 1, "CrossMap.py chain file not found: ${chain_file}" }
     .set { chain_file_ch }
 
 // Header log info
@@ -98,6 +103,7 @@ summary['Pipeline Name']            = 'eqtlgenimpute'
 summary['Pipeline Version']         = workflow.manifest.version
 summary['Path to QCd input']        = params.qcdata
 summary['Cohort build']             = params.genome_build
+summary['Chain file']             = chain_file
 summary['Skip crossmap']             = skip_crossmap
 summary['Harmonisation ref panel hg38']  = params.ref_panel_hg38
 summary['Target reference genome hg38'] = params.target_ref
@@ -144,7 +150,7 @@ process crossmap{
     awk '{print \$7}' crossmap_input.bed | sort > input_ids.txt
     awk '{print \$7}' crossmap_output.bed | sort > output_ids.txt
     comm -23 input_ids.txt output_ids.txt | awk '{split(\$0,a,"___"); print a[1]}' > excluded_ids.txt
-    plink2 --bfile ${study_name} --exclude excluded_ids.txt --make-bed --output-chr MT --out crossmapped_plink
+    plink2 --bfile ${study_name} --exclude excluded_ids.txt --make-bed --output-chr MT --out crossmapped_plink --keep-allele-order
     awk -F'\t' 'BEGIN {OFS=FS} {print \$1,\$4,0,\$2,\$5,\$6}' crossmap_output.bed > crossmapped_plink.bim
     """
 }
@@ -361,6 +367,64 @@ process filter_maf{
     bcftools +fill-tags ${vcf} -Ou -- -t AF,MAF \
     | bcftools filter -i 'INFO/MAF[0] > 0.01' -Oz -o chr${chromosome}.filtered.vcf.gz
     """
+}
+
+process extract_maf_ref{
+
+    input:
+    tuple file(vcf_file), file(vcf_file_index) from ref_panel_maf.collect()
+    
+    output:
+    file("ref_allele_frequencies.txt") into ref_af
+
+    script:
+    """
+    bcftools \
+    query -f '%ID\\t%CHROM\\t%POS\\t%REF\\t%ALT\\t%AF\\t%AF_EUR\\n' \
+    ${vcf_file} > ref_allele_frequencies.txt
+    """
+}
+
+process extract_maf_target{
+
+    input:
+    set val(chromosome), file(vcf) from imputed_vcf_filtered_cf
+
+    output:
+    file("*_AF.txt") into target_af
+
+    script:
+    """
+    bcftools \
+    query -f '%ID\\t%CHROM\\t%POS\\t%REF\\t%ALT\\t%AF\\t%IMPUTED\\t%TYPED\\t%R2\\n' \
+    ${vcf} > ${chromosome}_AF.txt
+    """
+}
+
+maf_check_ch = target_af.collect().combine(ref_af)
+
+process compare_MAF{
+
+    container = "quay.io/eqtlgen/popassign:v0.6"
+
+    publishDir "${params.outdir}/", mode: 'copy', pattern: "*.html", overwrite: true
+
+    input:
+    path files from maf_check_ch
+    val workflow_version from workflow.manifest.version
+
+    output:
+    path "Report_ImputationQc.html" into report_output_ch
+
+    script:
+    """
+    # Make report
+    cp -L $baseDir/bin/Report_template.Rmd notebook.Rmd
+
+    R -e 'library(rmarkdown);rmarkdown::render("notebook.Rmd", "html_document", 
+    output_file = "Report_ImputationQc.html", params=list(workflow_version = "${workflow_version}"))'
+    """
+
 }
 
 workflow.onComplete {
