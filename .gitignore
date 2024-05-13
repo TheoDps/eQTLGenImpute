@@ -1,3 +1,8 @@
 tests
 *html
 bin/GenotypeHarmonizer-1.4.20*
+.nextflow*
+work/*
+singularity_img
+ImputeGenotypes.o[1-9][1-9][1-9][1-9][1-9][1-9][1-9]
+ImputeGenotypes.e[1-9][1-9][1-9][1-9][1-9][1-9][1-9]
